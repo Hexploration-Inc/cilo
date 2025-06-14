@@ -1,0 +1,11 @@
+main.o
+editor.o
+editor
+*.o
+*.exe
+*.out
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
