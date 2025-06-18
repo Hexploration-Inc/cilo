@@ -44,6 +44,7 @@ struct editorConfig {
   char *filename;
   char statusmsg[80];
   time_t statusmsg_time;
+  char *highlight_query;
   struct termios orig_termios;
 };
 
@@ -162,6 +163,24 @@ int getWindowSize(int *rows, int *cols) {
   }
 }
 
+static char *strcasestr_impl(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        if (tolower((unsigned char)*haystack) == tolower((unsigned char)*needle)) {
+            const char *h, *n;
+            for (h = haystack, n = needle; *h && *n; h++, n++) {
+                if (tolower((unsigned char)*h) != tolower((unsigned char)*n)) {
+                    break;
+                }
+            }
+            if (*n == '\0') {
+                return (char *)haystack;
+            }
+        }
+    }
+    return NULL;
+}
+
 /*********** output   *****************/
 
 void editorSetStatusMessage(const char *fmt, ...) {
@@ -202,9 +221,29 @@ void editorDrawRows(struct abuf *ab) {
         abAppend(ab, "~", 1);
       }
     } else {
+      char *line = E.row[filerow].chars;
       int len = E.row[filerow].size;
-      if (len > E.screencols) len = E.screencols;
-      abAppend(ab, E.row[filerow].chars, len);
+      char *hl_query = E.highlight_query;
+
+      if (!hl_query) {
+        abAppend(ab, line, len);
+      } else {
+        char *current = line;
+        int query_len = strlen(hl_query);
+        if (query_len == 0) {
+          abAppend(ab, line, len);
+        } else {
+          char *match;
+          while((match = strcasestr_impl(current, hl_query))) {
+            abAppend(ab, current, match - current);
+            abAppend(ab, "\x1b[7m", 4);
+            abAppend(ab, match, query_len);
+            abAppend(ab, "\x1b[m", 3);
+            current = match + query_len;
+          }
+          abAppend(ab, current, line + len - current);
+        }
+      }
     }
     
     abAppend(ab, "\x1b[K", 3);
@@ -363,6 +402,99 @@ void editorDelChar(void) {
 }
 
 /*********** input   *****************/
+char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
+  size_t bufsize = 128;
+  char *buf = malloc(bufsize);
+  size_t buflen = 0;
+  buf[0] = '\0';
+  while (1) {
+    editorSetStatusMessage(prompt, buf);
+    editorRefreshScreen();
+    int c = editorReadKey();
+    if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+      if (buflen != 0) buf[--buflen] = '\0';
+    } else if (c == '\x1b') {
+      editorSetStatusMessage("");
+      if (callback) callback(buf, c);
+      free(buf);
+      return NULL;
+    } else if (c == '\r') {
+      if (buflen != 0) {
+        editorSetStatusMessage("");
+        if (callback) callback(buf, c);
+        return buf;
+      }
+    } else if (!iscntrl(c) && c < 128) {
+      if (buflen == bufsize - 1) {
+        bufsize *= 2;
+        buf = realloc(buf, bufsize);
+      }
+      buf[buflen++] = c;
+      buf[buflen] = '\0';
+    }
+    if (callback) callback(buf, c);
+  }
+}
+
+void editorFindCallback(char *query, int key) {
+  static int last_match = -1;
+  static int direction = 1;
+
+  free(E.highlight_query);
+  E.highlight_query = strdup(query);
+
+  if (key == '\r' || key == '\x1b') {
+    last_match = -1;
+    direction = 1;
+    return;
+  } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+    direction = 1;
+  } else if (key == ARROW_LEFT || key == ARROW_UP) {
+    direction = -1;
+  } else {
+    last_match = -1;
+    direction = 1;
+  }
+
+  if (last_match == -1) direction = 1;
+  int current = last_match;
+  int i;
+  for (i = 0; i < E.numrows; i++) {
+    current += direction;
+    if (current == -1) current = E.numrows - 1;
+    else if (current == E.numrows) current = 0;
+    
+    erow *row = &E.row[current];
+    char *match = strcasestr_impl(row->chars, query);
+    if (match) {
+      last_match = current;
+      E.cy = current;
+      E.cx = match - row->chars;
+      E.rowoff = E.numrows;
+      break;
+    }
+  }
+}
+
+void editorFind(void) {
+  int saved_cx = E.cx;
+  int saved_cy = E.cy;
+  int saved_rowoff = E.rowoff;
+
+  char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback);
+  
+  free(E.highlight_query);
+  E.highlight_query = NULL;
+
+  if (query) {
+    free(query);
+  } else {
+    E.cx = saved_cx;
+    E.cy = saved_cy;
+    E.rowoff = saved_rowoff;
+  }
+}
+
 void editorMoveCursor(int key) {
   erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
 
@@ -408,6 +540,10 @@ void editorProcessKeypress(void) {
 
     case CTRL_KEY('s'):
       editorSave();
+      break;
+
+    case CTRL_KEY('f'):
+      editorFind();
       break;
 
     case BACKSPACE:
@@ -462,6 +598,7 @@ void initEditor(void) {
   E.filename = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
+  E.highlight_query = NULL;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
