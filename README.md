@@ -1,5 +1,4 @@
 # Text Editor in C
-testing
 This is a project to build a text editor in C from scratch. The goal is to create a lightweight, fast, and feature-rich text editor that can be used on a day-to-day basis.
 
 ## Features
