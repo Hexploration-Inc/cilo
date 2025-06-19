@@ -182,6 +182,16 @@ static char *strcasestr_impl(const char *haystack, const char *needle) {
     return NULL;
 }
 
+int editorLineNumberWidth(void) {
+  int digits = 1;
+  int max_line = E.numrows > 0 ? E.numrows : 1;
+  while (max_line >= 10) {
+    max_line /= 10;
+    digits++;
+  }
+  return digits + 1; // +1 for space after line number
+}
+
 /*********** output   *****************/
 
 void editorSetStatusMessage(const char *fmt, ...) {
@@ -199,41 +209,52 @@ void editorScroll(void) {
   if (E.cy >= E.rowoff + E.screenrows) {
     E.rowoff = E.cy - E.screenrows + 1;
   }
+  
+  int available_width = E.screencols - editorLineNumberWidth();
   if (E.cx < E.coloff) {
     E.coloff = E.cx;
   }
-  if (E.cx >= E.coloff + E.screencols) {
-    E.coloff = E.cx - E.screencols + 1;
+  if (E.cx >= E.coloff + available_width) {
+    E.coloff = E.cx - available_width + 1;
   }
 }
 
 void editorDrawRows(struct abuf *ab) {
   int y;
+  int line_num_width = editorLineNumberWidth();
   for (y = 0; y < E.screenrows; y++) {
     int filerow = y + E.rowoff;
+    
+    // Draw line number
+    if (filerow >= E.numrows) {
+      char line_num[16];
+      snprintf(line_num, sizeof(line_num), "%*s", line_num_width, "~");
+      abAppend(ab, line_num, line_num_width);
+    } else {
+      char line_num[16];
+      snprintf(line_num, sizeof(line_num), "%*d ", line_num_width - 1, filerow + 1);
+      abAppend(ab, line_num, line_num_width);
+    }
+    
     if (filerow >= E.numrows) {
       if (E.numrows == 0 && y == E.screenrows / 3) {
         char welcome[80];
         int welcomelen = snprintf(welcome, sizeof(welcome),
           "Cilo editor -- version 0.0.1");
-        if (welcomelen > E.screencols) welcomelen = E.screencols;
-        int padding = (E.screencols - welcomelen) / 2;
-        if (padding) {
-          abAppend(ab, "~", 1);
-          padding--;
-        }
+        int available_width = E.screencols - line_num_width;
+        if (welcomelen > available_width) welcomelen = available_width;
+        int padding = (available_width - welcomelen) / 2;
         while (padding--) abAppend(ab, " ", 1);
         abAppend(ab, welcome, welcomelen);
-      } else {
-        abAppend(ab, "~", 1);
       }
     } else {
       char *line = E.row[filerow].chars;
       int len = E.row[filerow].size;
+      int available_width = E.screencols - line_num_width;
       if (len > E.coloff) {
         line += E.coloff;
         len -= E.coloff;
-        if (len > E.screencols) len = E.screencols;
+        if (len > available_width) len = available_width;
       } else {
         len = 0;
       }
@@ -307,7 +328,8 @@ void editorRefreshScreen(void) {
   editorDrawMessageBar(&ab);
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
+  int line_num_width = editorLineNumberWidth();
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + line_num_width + 1);
   abAppend(&ab, buf, strlen(buf));
 
   abAppend(&ab, "\x1b[?25h", 6);
