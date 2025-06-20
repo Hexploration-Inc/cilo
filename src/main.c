@@ -46,8 +46,11 @@ struct editorConfig {
   char statusmsg[80];
   time_t statusmsg_time;
   char *highlight_query;
-  struct termios orig_termios;
+  int sel_start_x;
+  int sel_start_y;
+  int selecting;
   char *clipboard;
+  struct termios orig_termios;
 };
 
 struct editorConfig E;
@@ -223,25 +226,40 @@ void editorScroll(void) {
 void editorDrawRows(struct abuf *ab) {
   int y;
   int line_num_width = editorLineNumberWidth();
+
+  // Determine the selection start and end points, regardless of cursor direction
+  int start_y, start_x, end_y, end_x;
+  int selection_is_active = E.selecting;
+  if (selection_is_active) {
+    if (E.sel_start_y < E.cy || (E.sel_start_y == E.cy && E.sel_start_x <= E.cx)) {
+      start_y = E.sel_start_y;
+      start_x = E.sel_start_x;
+      end_y = E.cy;
+      end_x = E.cx;
+    } else {
+      start_y = E.cy;
+      start_x = E.cx;
+      end_y = E.sel_start_y;
+      end_x = E.sel_start_x;
+    }
+  }
+
   for (y = 0; y < E.screenrows; y++) {
     int filerow = y + E.rowoff;
     
     // Draw line number
+    char line_num[16];
     if (filerow >= E.numrows) {
-      char line_num[16];
       snprintf(line_num, sizeof(line_num), "%*s", line_num_width, "~");
-      abAppend(ab, line_num, line_num_width);
     } else {
-      char line_num[16];
       snprintf(line_num, sizeof(line_num), "%*d ", line_num_width - 1, filerow + 1);
-      abAppend(ab, line_num, line_num_width);
     }
+    abAppend(ab, line_num, line_num_width);
     
     if (filerow >= E.numrows) {
       if (E.numrows == 0 && y == E.screenrows / 3) {
         char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome),
-          "Cilo editor -- version 0.0.1");
+        int welcomelen = snprintf(welcome, sizeof(welcome), "Cilo editor -- version 0.0.1");
         int available_width = E.screencols - line_num_width;
         if (welcomelen > available_width) welcomelen = available_width;
         int padding = (available_width - welcomelen) / 2;
@@ -249,35 +267,66 @@ void editorDrawRows(struct abuf *ab) {
         abAppend(ab, welcome, welcomelen);
       }
     } else {
-      char *line = E.row[filerow].chars;
-      int len = E.row[filerow].size;
+      erow *row = &E.row[filerow];
       int available_width = E.screencols - line_num_width;
-      if (len > E.coloff) {
-        line += E.coloff;
-        len -= E.coloff;
-        if (len > available_width) len = available_width;
-      } else {
-        len = 0;
+      
+      // Highlighting Logic
+      int is_row_selected = selection_is_active && (filerow >= start_y && filerow <= end_y);
+      int sel_start_col = is_row_selected ? (filerow == start_y ? start_x : 0) : -1;
+      int sel_end_col = is_row_selected ? (filerow == end_y ? end_x : row->size) : -1;
+      
+      // Selection highlighting overrides search highlighting
+      char *highlight_search = E.highlight_query;
+      if (is_row_selected) {
+        highlight_search = NULL;
       }
-      char *hl_query = E.highlight_query;
+      
+      int visible_len = row->size - E.coloff;
+      if (visible_len < 0) visible_len = 0;
+      if (visible_len > available_width) visible_len = available_width;
+      char *visible_start = row->chars + E.coloff;
 
-      if (!hl_query || len == 0) {
-        abAppend(ab, line, len);
+      if (!is_row_selected && !highlight_search) {
+        abAppend(ab, visible_start, visible_len);
       } else {
-        char *current = line;
-        int query_len = strlen(hl_query);
-        if (query_len == 0) {
-          abAppend(ab, line, len);
+        // Find intersection of visible area and selection area
+        int vis_sel_start = sel_start_col != -1 ? (E.coloff > sel_start_col ? E.coloff : sel_start_col) : -1;
+        int vis_sel_end = sel_end_col != -1 ? ((E.coloff + visible_len) < sel_end_col ? (E.coloff + visible_len) : sel_end_col) : -1;
+
+        if (is_row_selected && vis_sel_start < vis_sel_end) {
+          // Draw with selection highlighting
+          int pre_len = vis_sel_start - E.coloff;
+          if (pre_len > 0) abAppend(ab, visible_start, pre_len);
+          
+          abAppend(ab, "\x1b[7m", 4);
+          abAppend(ab, row->chars + vis_sel_start, vis_sel_end - vis_sel_start);
+          abAppend(ab, "\x1b[m", 3);
+
+          int post_start_offset = vis_sel_end - E.coloff;
+          int post_len = visible_len - post_start_offset;
+          if (post_len > 0) abAppend(ab, visible_start + post_start_offset, post_len);
+        } else if (highlight_search) {
+          // Draw with search highlighting
+            char *current = visible_start;
+            int query_len = strlen(highlight_search);
+            char *end_of_visible = visible_start + visible_len;
+            
+            while(current < end_of_visible) {
+                char *match = strcasestr_impl(current, highlight_search);
+                if (match && match < end_of_visible) {
+                    abAppend(ab, current, match - current);
+                    abAppend(ab, "\x1b[7m", 4);
+                    int match_len = (match + query_len > end_of_visible) ? (end_of_visible - match) : query_len;
+                    abAppend(ab, match, match_len);
+                    abAppend(ab, "\x1b[m", 3);
+                    current = match + query_len;
+                } else {
+                    abAppend(ab, current, end_of_visible - current);
+                    break;
+                }
+            }
         } else {
-          char *match;
-          while((match = strcasestr_impl(current, hl_query))) {
-            abAppend(ab, current, match - current);
-            abAppend(ab, "\x1b[7m", 4);
-            abAppend(ab, match, query_len);
-            abAppend(ab, "\x1b[m", 3);
-            current = match + query_len;
-          }
-          abAppend(ab, current, line + len - current);
+            abAppend(ab, visible_start, visible_len);
         }
       }
     }
@@ -492,6 +541,105 @@ void editorDelChar(void) {
   }
 }
 
+char *editorGetSelection(size_t *buflen) {
+    if (!E.selecting) return NULL;
+
+    int start_y, start_x, end_y, end_x;
+    if (E.sel_start_y < E.cy || (E.sel_start_y == E.cy && E.sel_start_x <= E.cx)) {
+        start_y = E.sel_start_y;
+        start_x = E.sel_start_x;
+        end_y = E.cy;
+        end_x = E.cx;
+    } else {
+        start_y = E.cy;
+        start_x = E.cx;
+        end_y = E.sel_start_y;
+        end_x = E.sel_start_x;
+    }
+
+    if (start_y < 0 || end_y >= E.numrows) return NULL;
+
+    struct abuf ab = ABUF_INIT;
+
+    if (start_y == end_y) {
+        erow *row = &E.row[start_y];
+        if (start_x >= row->size || start_x >= end_x) {
+             abFree(&ab);
+             return NULL;
+        }
+        int len = end_x - start_x;
+        if (len > row->size - start_x) len = row->size - start_x;
+        abAppend(&ab, &row->chars[start_x], len);
+    } else {
+        erow *row = &E.row[start_y];
+        int len = row->size - start_x;
+        if (len > 0) abAppend(&ab, &row->chars[start_x], len);
+        abAppend(&ab, "\n", 1);
+
+        for (int i = start_y + 1; i < end_y; i++) {
+            row = &E.row[i];
+            abAppend(&ab, row->chars, row->size);
+            abAppend(&ab, "\n", 1);
+        }
+
+        row = &E.row[end_y];
+        if (end_x > 0) {
+             if (end_x > row->size) end_x = row->size;
+             abAppend(&ab, row->chars, end_x);
+        }
+    }
+    
+    if (buflen) *buflen = ab.len;
+    return ab.b;
+}
+
+void editorDeleteSelection(void) {
+    if (!E.selecting) return;
+
+    int start_y, start_x, end_y, end_x;
+    if (E.sel_start_y < E.cy || (E.sel_start_y == E.cy && E.sel_start_x <= E.cx)) {
+        start_y = E.sel_start_y;
+        start_x = E.sel_start_x;
+        end_y = E.cy;
+        end_x = E.cx;
+    } else {
+        start_y = E.cy;
+        start_x = E.cx;
+        end_y = E.sel_start_y;
+        end_x = E.sel_start_x;
+    }
+    
+    if (start_y < 0 || end_y >= E.numrows) return;
+
+    if (start_y == end_y) {
+        erow *row = &E.row[start_y];
+        if (start_x >= row->size || start_x >= end_x) return;
+        int len = end_x - start_x;
+        if (len > row->size - start_x) len = row->size - start_x;
+        
+        memmove(&row->chars[start_x], &row->chars[start_x + len], row->size - start_x - len + 1);
+        row->size -= len;
+    } else {
+        erow *first_row = &E.row[start_y];
+        erow *last_row = &E.row[end_y];
+        
+        char *last_line_remainder = &last_row->chars[end_x];
+        int remainder_len = last_row->size - end_x;
+        
+        first_row->size = start_x;
+        first_row->chars[first_row->size] = '\0';
+        editorRowAppendString(first_row, last_line_remainder, remainder_len);
+
+        for (int i = start_y + 1; i <= end_y; i++) {
+            editorDelRow(start_y + 1);
+        }
+    }
+    
+    E.cy = start_y;
+    E.cx = start_x;
+    E.selecting = 0;
+}
+
 /*********** input   *****************/
 char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
   size_t bufsize = 128;
@@ -687,7 +835,12 @@ void editorProcessKeypress(void) {
       break;
     
     case CTRL_KEY('c'): // Copy
-      if (E.cy < E.numrows) {
+      if (E.selecting) {
+        free(E.clipboard);
+        E.clipboard = editorGetSelection(NULL);
+        E.selecting = 0;
+        editorSetStatusMessage("Copied selection to clipboard");
+      } else if (E.cy < E.numrows) {
         free(E.clipboard);
         E.clipboard = strdup(E.row[E.cy].chars);
         editorSetStatusMessage("Copied line to clipboard");
@@ -695,7 +848,12 @@ void editorProcessKeypress(void) {
       break;
 
     case CTRL_KEY('x'): // Cut
-      if (E.cy < E.numrows) {
+      if (E.selecting) {
+        free(E.clipboard);
+        E.clipboard = editorGetSelection(NULL);
+        editorDeleteSelection(); // Deletes and turns off selection
+        editorSetStatusMessage("Cut selection to clipboard");
+      } else if (E.cy < E.numrows) {
         free(E.clipboard);
         E.clipboard = strdup(E.row[E.cy].chars);
         editorDelRow(E.cy);
@@ -704,10 +862,39 @@ void editorProcessKeypress(void) {
       break;
 
     case CTRL_KEY('v'): // Paste
+      if (E.selecting) {
+        editorDeleteSelection(); // If something is selected, paste replaces it
+      }
       if (E.clipboard) {
-        editorInsertRow(E.cy + 1, E.clipboard, strlen(E.clipboard));
-        E.cy++;
+        char *s = E.clipboard;
+        while (*s) {
+          if (*s == '\n' || *s == '\r') {
+            editorInsertNewline();
+          } else {
+            editorInsertChar(*s);
+          }
+          s++;
+        }
         editorSetStatusMessage("Pasted from clipboard");
+      }
+      break;
+
+    case CTRL_KEY('b'): // Begin/End selection
+      if (E.selecting) {
+        E.selecting = 0;
+        editorSetStatusMessage("Selection mode OFF");
+      } else {
+        E.selecting = 1;
+        E.sel_start_x = E.cx;
+        E.sel_start_y = E.cy;
+        editorSetStatusMessage("Selection mode ON. Press ESC to cancel.");
+      }
+      break;
+
+    case '\x1b': // Escape key
+      if (E.selecting) {
+        E.selecting = 0;
+        editorSetStatusMessage("Selection cancelled");
       }
       break;
 
@@ -729,6 +916,9 @@ void initEditor(void) {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.highlight_query = NULL;
+  E.sel_start_x = -1;
+  E.sel_start_y = -1;
+  E.selecting = 0;
   E.clipboard = NULL;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
