@@ -47,6 +47,7 @@ struct editorConfig {
   time_t statusmsg_time;
   char *highlight_query;
   struct termios orig_termios;
+  char *clipboard;
 };
 
 struct editorConfig E;
@@ -646,9 +647,17 @@ void editorProcessKeypress(void) {
       break;
 
     case DEL_KEY:
-      if (E.cy < E.numrows && E.cx < E.row[E.cy].size) {
-        editorMoveCursor(ARROW_RIGHT);
-        editorDelChar();
+      {
+        if (E.cy >= E.numrows) break;
+        erow *row = &E.row[E.cy];
+
+        if (E.cx < row->size) {
+          editorRowDelChar(row, E.cx);
+        } else if (E.cy < E.numrows - 1) {
+          erow *next_row = &E.row[E.cy + 1];
+          editorRowAppendString(row, next_row->chars, next_row->size);
+          editorDelRow(E.cy + 1);
+        }
       }
       break;
 
@@ -677,6 +686,31 @@ void editorProcessKeypress(void) {
       editorMoveCursor(c);
       break;
     
+    case CTRL_KEY('c'): // Copy
+      if (E.cy < E.numrows) {
+        free(E.clipboard);
+        E.clipboard = strdup(E.row[E.cy].chars);
+        editorSetStatusMessage("Copied line to clipboard");
+      }
+      break;
+
+    case CTRL_KEY('x'): // Cut
+      if (E.cy < E.numrows) {
+        free(E.clipboard);
+        E.clipboard = strdup(E.row[E.cy].chars);
+        editorDelRow(E.cy);
+        editorSetStatusMessage("Cut line to clipboard");
+      }
+      break;
+
+    case CTRL_KEY('v'): // Paste
+      if (E.clipboard) {
+        editorInsertRow(E.cy + 1, E.clipboard, strlen(E.clipboard));
+        E.cy++;
+        editorSetStatusMessage("Pasted from clipboard");
+      }
+      break;
+
     default:
       editorInsertChar(c);
       break;
@@ -695,6 +729,7 @@ void initEditor(void) {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.highlight_query = NULL;
+  E.clipboard = NULL;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
